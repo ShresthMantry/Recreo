@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import {
   View,
   Text,
@@ -19,8 +19,9 @@ import axios from "axios";
 import Slider from "@react-native-community/slider";
 import * as SecureStore from "expo-secure-store";
 import YoutubePlayer from "react-native-youtube-iframe";
+import { useFocusEffect } from "@react-navigation/native";
 
-// Environment variables
+// Environment variables - In a real app, use expo-constants or .env file
 const YOUTUBE_API_KEY = "AIzaSyAWUBzgPnvzvMjBi-IjeW-YCfTE97Cm4Nc";
 const YOUTUBE_API_BASE_URL = "https://www.googleapis.com/youtube/v3";
 
@@ -37,30 +38,20 @@ interface Track {
   snippet: {
     title: string;
     channelTitle: string;
-    publishedAt: string;
-    description: string;
     thumbnails: {
-      default: Thumbnail;
-      medium: Thumbnail;
-      high: Thumbnail;
+      medium: {
+        url: string;
+      };
     };
   };
   favorite?: boolean;
 }
 
-interface Thumbnail {
-  url: string;
-  width: number;
-  height: number;
-}
-
 export default function YouTubeMusicPlayer() {
   // State variables
   const [tracks, setTracks] = useState<Track[]>([]);
-  const [filteredTracks, setFilteredTracks] = useState<Track[]>([]);
   const [favorites, setFavorites] = useState<Track[]>([]);
   const [searchQuery, setSearchQuery] = useState<string>("relaxing music");
-  const [isSearching, setIsSearching] = useState<boolean>(false);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [currentTrack, setCurrentTrack] = useState<Track | null>(null);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
@@ -69,30 +60,99 @@ export default function YouTubeMusicPlayer() {
   const [isBuffering, setIsBuffering] = useState<boolean>(false);
   const [isShuffle, setIsShuffle] = useState<boolean>(false);
   const [isRepeat, setIsRepeat] = useState<boolean>(false);
-  const [nextPageToken, setNextPageToken] = useState<string | undefined>(undefined);
+  const [nextPageToken, setNextPageToken] = useState<string | undefined>();
   const [activeTab, setActiveTab] = useState<'discover' | 'favorites'>('discover');
   const [playerReady, setPlayerReady] = useState(false);
 
   // Refs
   const playerRef = useRef<any>(null);
   const searchTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const flatListRef = useRef<FlatList<Track> | null>(null);
   const progressIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   // Constants
   const { width } = Dimensions.get("window");
 
+  // Memoized filtered tracks
+  const filteredTracks = useMemo(() => {
+    return activeTab === 'favorites' ? favorites : tracks;
+  }, [activeTab, favorites, tracks]);
+
   // Load favorites from storage
-  useEffect(() => {
-    loadFavorites();
-    return () => {
-      if (progressIntervalRef.current) {
-        clearInterval(progressIntervalRef.current);
+  const loadFavorites = useCallback(async () => {
+    try {
+      const storedFavorites = await SecureStore.getItemAsync("favorites");
+      if (storedFavorites) {
+        const parsedFavorites = JSON.parse(storedFavorites) as Track[];
+        setFavorites(parsedFavorites);
+        
+        // Update favorite status in tracks
+        setTracks(prevTracks => 
+          prevTracks.map(track => ({
+            ...track,
+            favorite: parsedFavorites.some(fav => fav.id.videoId === track.id.videoId)
+          }))
+        );
       }
-    };
+    } catch (error) {
+      console.error("Failed to load favorites", error);
+    }
   }, []);
 
-  // Search effect
+  // Save favorites to storage
+  const saveFavorites = useCallback(async (updatedFavorites: Track[]) => {
+    try {
+      await SecureStore.setItemAsync("favorites", JSON.stringify(updatedFavorites));
+    } catch (error) {
+      console.error("Failed to save favorites", error);
+    }
+  }, []);
+
+  // Focus effect to load favorites when screen gains focus
+  useFocusEffect(
+    useCallback(() => {
+      loadFavorites();
+      return () => {};
+    }, [loadFavorites])
+  );
+
+  // Search YouTube API for tracks
+  const searchTracks = useCallback(async (query: string, pageToken?: string) => {
+    if (!query.trim()) return;
+
+    setIsLoading(true);
+
+    try {
+      const response = await axios.get<YouTubeSearchResponse>(
+        `${YOUTUBE_API_BASE_URL}/search`,
+        {
+          params: {
+            part: "snippet",
+            q: query,
+            type: "video",
+            videoCategoryId: "10", // Music category
+            maxResults: 15,
+            key: YOUTUBE_API_KEY,
+            pageToken: pageToken,
+          },
+        }
+      );
+
+      const newTracks = response.data.items.map(track => ({
+        ...track,
+        favorite: favorites.some(fav => fav.id.videoId === track.id.videoId)
+      }));
+
+      setTracks(prev => pageToken ? [...prev, ...newTracks] : newTracks);
+      setNextPageToken(response.data.nextPageToken);
+    } catch (error) {
+      console.error("Error searching tracks:", error);
+      Alert.alert("Error", "Failed to search tracks. Please try again later.");
+    } finally {
+      setIsLoading(false);
+    }
+  }, [favorites]);
+
+  // Debounced search effect
   useEffect(() => {
     if (searchTimeoutRef.current) {
       clearTimeout(searchTimeoutRef.current);
@@ -107,21 +167,10 @@ export default function YouTubeMusicPlayer() {
         clearTimeout(searchTimeoutRef.current);
       }
     };
-  }, [searchQuery]);
+  }, [searchQuery, searchTracks]);
 
-  // Filter tracks when showing favorites
-  useEffect(() => {
-    if (activeTab === 'favorites') {
-      setFilteredTracks(favorites);
-    } else {
-      setFilteredTracks(tracks);
-    }
-  }, [activeTab, tracks, favorites]);
-
-  // Handle player state changes
-  const onPlayerStateChange = (state: string) => {
-    console.log("Player state:", state);
-    
+  // Player state handler
+  const onPlayerStateChange = useCallback((state: string) => {
     switch (state) {
       case "playing":
         setIsBuffering(false);
@@ -149,10 +198,10 @@ export default function YouTubeMusicPlayer() {
       default:
         break;
     }
-  };
+  }, [isRepeat]);
 
   // Progress timer functions
-  const startProgressTimer = () => {
+  const startProgressTimer = useCallback(() => {
     stopProgressTimer();
     progressIntervalRef.current = setInterval(async () => {
       if (playerRef.current) {
@@ -164,99 +213,21 @@ export default function YouTubeMusicPlayer() {
         }
       }
     }, 1000);
-  };
+  }, []);
 
-  const stopProgressTimer = () => {
+  const stopProgressTimer = useCallback(() => {
     if (progressIntervalRef.current) {
       clearInterval(progressIntervalRef.current);
       progressIntervalRef.current = null;
     }
-  };
-
-  // Load favorites from storage
-  const loadFavorites = async () => {
-    try {
-      const storedFavorites = await SecureStore.getItemAsync("favorites");
-      if (storedFavorites) {
-        const parsedFavorites = JSON.parse(storedFavorites) as Track[];
-        setFavorites(parsedFavorites);
-      }
-    } catch (error) {
-      console.error("Failed to load favorites", error);
-    }
-  };
-
-  // Save favorites to storage
-  const saveFavorites = async (updatedFavorites: Track[]) => {
-    try {
-      await SecureStore.setItemAsync(
-        "favorites",
-        JSON.stringify(updatedFavorites)
-      );
-    } catch (error) {
-      console.error("Failed to save favorites", error);
-    }
-  };
-
-  // Search YouTube API for tracks
-  const searchTracks = async (query: string, pageToken?: string) => {
-    if (!query.trim()) return;
-
-    setIsLoading(true);
-    setIsSearching(true);
-
-    try {
-      const response = await axios.get<YouTubeSearchResponse>(
-        `${YOUTUBE_API_BASE_URL}/search`,
-        {
-          params: {
-            part: "snippet",
-            q: query,
-            type: "video",
-            videoCategoryId: "10", // Music category
-            maxResults: 15,
-            key: YOUTUBE_API_KEY,
-            pageToken: pageToken,
-          },
-        }
-      );
-
-      // Update tracks list
-      const newTracks = response.data.items.map(track => ({
-        ...track,
-        favorite: favorites.some(fav => fav.id.videoId === track.id.videoId)
-      }));
-
-      if (pageToken) {
-        setTracks(prev => [...prev, ...newTracks]);
-      } else {
-        setTracks(newTracks);
-      }
-
-      setNextPageToken(response.data.nextPageToken);
-    } catch (error) {
-      console.error("Error searching tracks:", error);
-      Alert.alert("Error", "Failed to search tracks. Please try again later.");
-    } finally {
-      setIsLoading(false);
-      setIsSearching(false);
-    }
-  };
-
-  // Load more tracks when reaching end of list
-  const loadMoreTracks = () => {
-    if (!isLoading && nextPageToken) {
-      searchTracks(searchQuery, nextPageToken);
-    }
-  };
+  }, []);
 
   // Play track
-  const playTrack = async (track: Track) => {
+  const playTrack = useCallback(async (track: Track) => {
     try {
       setCurrentTrack(track);
       setIsBuffering(true);
       
-      // If player is ready, seek to start and play
       if (playerRef.current) {
         await playerRef.current.seekTo(0, true);
         setIsPlaying(true);
@@ -266,140 +237,102 @@ export default function YouTubeMusicPlayer() {
       Alert.alert("Playback Error", "Could not play this track");
       setIsBuffering(false);
     }
-  };
+  }, []);
 
   // Toggle play/pause
-  const togglePlayPause = async () => {
+  const togglePlayPause = useCallback(async () => {
     if (!currentTrack) return;
     
     try {
       if (isPlaying) {
         await playerRef.current?.pauseVideo();
-        setIsPlaying(false);
       } else {
         await playerRef.current?.playVideo();
-        setIsPlaying(true);
       }
     } catch (error) {
       console.error("Error toggling play/pause:", error);
     }
-  };
+  }, [currentTrack, isPlaying]);
 
   // Play next track
-  const playNextTrack = () => {
+  const playNextTrack = useCallback(() => {
     if (!currentTrack || filteredTracks.length === 0) return;
 
     const currentIndex = filteredTracks.findIndex(
       (track) => track.id.videoId === currentTrack.id.videoId
     );
 
-    let nextIndex;
-    if (isShuffle) {
-      nextIndex = Math.floor(Math.random() * filteredTracks.length);
-    } else {
-      nextIndex = (currentIndex + 1) % filteredTracks.length;
-    }
+    let nextIndex = isShuffle 
+      ? Math.floor(Math.random() * filteredTracks.length)
+      : (currentIndex + 1) % filteredTracks.length;
 
     playTrack(filteredTracks[nextIndex]);
-    scrollToTrack(nextIndex);
-  };
+  }, [currentTrack, filteredTracks, isShuffle, playTrack]);
 
   // Play previous track
-  const playPreviousTrack = () => {
+  const playPreviousTrack = useCallback(() => {
     if (!currentTrack || filteredTracks.length === 0) return;
 
     const currentIndex = filteredTracks.findIndex(
       (track) => track.id.videoId === currentTrack.id.videoId
     );
 
-    let prevIndex;
-    if (isShuffle) {
-      prevIndex = Math.floor(Math.random() * filteredTracks.length);
-    } else {
-      prevIndex = (currentIndex - 1 + filteredTracks.length) % filteredTracks.length;
-    }
+    let prevIndex = isShuffle
+      ? Math.floor(Math.random() * filteredTracks.length)
+      : (currentIndex - 1 + filteredTracks.length) % filteredTracks.length;
 
     playTrack(filteredTracks[prevIndex]);
-    scrollToTrack(prevIndex);
-  };
+  }, [currentTrack, filteredTracks, isShuffle, playTrack]);
 
-  // Scroll to track in list
-  const scrollToTrack = (index: number) => {
-    if (flatListRef.current) {
-      flatListRef.current.scrollToIndex({
-        index,
-        animated: true,
-        viewPosition: 0.5,
-      });
+  // Toggle favorite
+  const toggleFavorite = useCallback((track: Track) => {
+    const isFavorite = favorites.some(fav => fav.id.videoId === track.id.videoId);
+    let updatedFavorites: Track[];
+
+    if (isFavorite) {
+      updatedFavorites = favorites.filter(fav => fav.id.videoId !== track.id.videoId);
+    } else {
+      updatedFavorites = [...favorites, { ...track, favorite: true }];
     }
-  };
+
+    setFavorites(updatedFavorites);
+    saveFavorites(updatedFavorites);
+    
+    // Update tracks with new favorite status
+    setTracks(prevTracks => 
+      prevTracks.map(t => 
+        t.id.videoId === track.id.videoId 
+          ? { ...t, favorite: !isFavorite } 
+          : t
+      )
+    );
+
+    // Update current track if it's the one being toggled
+    if (currentTrack?.id.videoId === track.id.videoId) {
+      setCurrentTrack(prev => prev ? { ...prev, favorite: !isFavorite } : null);
+    }
+  }, [currentTrack, favorites, saveFavorites]);
+
+  // Format time
+  const formatTime = useCallback((millis: number): string => {
+    const totalSeconds = Math.floor(millis / 1000);
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${minutes}:${seconds < 10 ? '0' : ''}${seconds}`;
+  }, []);
 
   // Seek to position
-  const seekTo = async (value: number) => {
+  const seekTo = useCallback(async (value: number) => {
     if (!currentTrack) return;
     try {
       await playerRef.current?.seekTo(Math.round(value / 1000), true);
     } catch (error) {
       console.error("Error seeking:", error);
     }
-  };
+  }, [currentTrack]);
 
-  // Toggle repeat mode
-  const toggleRepeat = () => {
-    setIsRepeat(!isRepeat);
-  };
-
-  // Toggle favorite status for a track
-  const toggleFavorite = (track: Track) => {
-    const isFavorite = favorites.some(
-      (fav) => fav.id.videoId === track.id.videoId
-    );
-
-    let updatedFavorites: Track[];
-    let updatedTracks: Track[] = [...tracks];
-
-    if (isFavorite) {
-      updatedFavorites = favorites.filter(
-        (fav) => fav.id.videoId !== track.id.videoId
-      );
-      
-      // Update favorite status in tracks list
-      updatedTracks = updatedTracks.map(t => 
-        t.id.videoId === track.id.videoId 
-          ? { ...t, favorite: false } 
-          : t
-      );
-    } else {
-      updatedFavorites = [...favorites, { ...track, favorite: true }];
-      
-      // Update favorite status in tracks list
-      updatedTracks = updatedTracks.map(t => 
-        t.id.videoId === track.id.videoId 
-          ? { ...t, favorite: true } 
-          : t
-      );
-    }
-
-    setFavorites(updatedFavorites);
-    setTracks(updatedTracks);
-    saveFavorites(updatedFavorites);
-
-    // If current track is toggled, update its status
-    if (currentTrack?.id.videoId === track.id.videoId) {
-      setCurrentTrack({ ...currentTrack, favorite: !isFavorite });
-    }
-  };
-
-  // Format time (milliseconds to MM:SS)
-  const formatTime = (millis: number): string => {
-    const totalSeconds = Math.floor(millis / 1000);
-    const minutes = Math.floor(totalSeconds / 60);
-    const seconds = totalSeconds % 60;
-    return `${minutes}:${seconds < 10 ? '0' : ''}${seconds}`;
-  };
-
-  // Render track item
-  const renderTrackItem = ({ item, index }: { item: Track; index: number }) => {
+  // Memoized track item renderer
+  const renderTrackItem = useCallback(({ item }: { item: Track }) => {
     const isActive = currentTrack?.id.videoId === item.id.videoId;
     const isFavorite = favorites.some(fav => fav.id.videoId === item.id.videoId);
 
@@ -439,14 +372,13 @@ export default function YouTubeMusicPlayer() {
         </TouchableOpacity>
       </TouchableOpacity>
     );
-  };
+  }, [currentTrack, favorites, playTrack, toggleFavorite]);
 
-  // Main render
   return (
     <SafeAreaView style={styles.container}>
       <StatusBar style="dark" />
 
-      {/* YouTube Player (hidden) */}
+      {/* Hidden YouTube Player */}
       {currentTrack && (
         <View style={styles.videoContainer}>
           <YoutubePlayer
@@ -476,9 +408,9 @@ export default function YouTubeMusicPlayer() {
         </View>
       )}
 
-      {/* Header with search */}
+      {/* Header */}
       <View style={styles.header}>
-        <Text style={styles.title}>YTMusic</Text>
+        <Text style={styles.title}>Music Player</Text>
         <View style={styles.searchContainer}>
           <Ionicons name="search" size={20} color="#888" style={styles.searchIcon} />
           <TextInput
@@ -491,7 +423,7 @@ export default function YouTubeMusicPlayer() {
         </View>
       </View>
 
-      {/* Tab buttons */}
+      {/* Tabs */}
       <View style={styles.tabContainer}>
         <TouchableOpacity
           style={[
@@ -523,50 +455,43 @@ export default function YouTubeMusicPlayer() {
         </TouchableOpacity>
       </View>
 
-      {/* Track list */}
+      {/* Track List */}
       {isLoading && filteredTracks.length === 0 ? (
         <View style={styles.loaderContainer}>
           <ActivityIndicator size="large" color="#ff3b5c" />
-          <Text style={styles.loaderText}>Loading tracks...</Text>
         </View>
       ) : filteredTracks.length === 0 ? (
         <View style={styles.emptyContainer}>
-          <MaterialIcons name={activeTab === 'favorites' ? "favorite" : "music-note"} size={50} color="#ddd" />
+          <MaterialIcons 
+            name={activeTab === 'favorites' ? "favorite" : "music-note"} 
+            size={50} 
+            color="#ddd" 
+          />
           <Text style={styles.emptyText}>
-            {activeTab === 'favorites' ? "No favorites yet" : "No tracks found"}
+            {activeTab === 'favorites' 
+              ? "No favorites yet" 
+              : "No tracks found"}
           </Text>
-          {activeTab === 'favorites' && (
-            <Text style={styles.emptySubtext}>
-              Tap the heart icon to add tracks to your favorites
-            </Text>
-          )}
         </View>
       ) : (
         <FlatList
-          ref={flatListRef}
           data={filteredTracks}
           keyExtractor={(item) => item.id.videoId}
           renderItem={renderTrackItem}
-          showsVerticalScrollIndicator={false}
           contentContainerStyle={styles.trackList}
-          onEndReached={activeTab === 'discover' ? loadMoreTracks : undefined}
+          onEndReached={activeTab === 'discover' ? () => nextPageToken && searchTracks(searchQuery, nextPageToken) : undefined}
           onEndReachedThreshold={0.5}
           ListFooterComponent={
             isLoading && filteredTracks.length > 0 ? (
-              <ActivityIndicator 
-                size="small" 
-                color="#ff3b5c" 
-                style={styles.footerLoader}
-              />
+              <ActivityIndicator size="small" color="#ff3b5c" />
             ) : null
           }
         />
       )}
 
-      {/* Player controls */}
+      {/* Player Controls */}
       {currentTrack && (
         <View style={styles.playerContainer}>
-          {/* Current track info */}
           <View style={styles.nowPlayingBar}>
             <Image
               source={{ uri: currentTrack.snippet.thumbnails.medium.url }}
@@ -580,10 +505,7 @@ export default function YouTubeMusicPlayer() {
                 {currentTrack.snippet.channelTitle}
               </Text>
             </View>
-            <TouchableOpacity
-              style={styles.favoriteButton}
-              onPress={() => toggleFavorite(currentTrack)}
-            >
+            <TouchableOpacity onPress={() => toggleFavorite(currentTrack)}>
               <MaterialIcons
                 name={currentTrack.favorite ? "favorite" : "favorite-border"}
                 size={24}
@@ -592,7 +514,6 @@ export default function YouTubeMusicPlayer() {
             </TouchableOpacity>
           </View>
 
-          {/* Progress bar */}
           <View style={styles.progressContainer}>
             <Text style={styles.timeText}>{formatTime(position)}</Text>
             <Slider
@@ -608,12 +529,8 @@ export default function YouTubeMusicPlayer() {
             <Text style={styles.timeText}>{formatTime(duration)}</Text>
           </View>
 
-          {/* Playback controls */}
           <View style={styles.controls}>
-            <TouchableOpacity
-              style={styles.controlButton}
-              onPress={() => setIsShuffle(!isShuffle)}
-            >
+            <TouchableOpacity onPress={() => setIsShuffle(!isShuffle)}>
               <Ionicons
                 name="shuffle"
                 size={22}
@@ -621,39 +538,30 @@ export default function YouTubeMusicPlayer() {
               />
             </TouchableOpacity>
 
-            <TouchableOpacity
-              style={styles.controlButton}
-              onPress={playPreviousTrack}
-            >
+            <TouchableOpacity onPress={playPreviousTrack}>
               <Ionicons name="play-skip-back" size={30} color="#333" />
             </TouchableOpacity>
 
-            {isBuffering ? (
-              <ActivityIndicator size="large" color="#ff3b5c" style={styles.playButton} />
-            ) : (
-              <TouchableOpacity
-                style={styles.playButton}
-                onPress={togglePlayPause}
-              >
+            <TouchableOpacity 
+              style={styles.playButton}
+              onPress={togglePlayPause}
+            >
+              {isBuffering ? (
+                <ActivityIndicator size="small" color="#fff" />
+              ) : (
                 <Ionicons
                   name={isPlaying ? "pause" : "play"}
                   size={30}
                   color="#fff"
                 />
-              </TouchableOpacity>
-            )}
+              )}
+            </TouchableOpacity>
 
-            <TouchableOpacity
-              style={styles.controlButton}
-              onPress={playNextTrack}
-            >
+            <TouchableOpacity onPress={playNextTrack}>
               <Ionicons name="play-skip-forward" size={30} color="#333" />
             </TouchableOpacity>
 
-            <TouchableOpacity
-              style={styles.controlButton}
-              onPress={toggleRepeat}
-            >
+            <TouchableOpacity onPress={() => setIsRepeat(!isRepeat)}>
               <Ionicons
                 name="repeat"
                 size={22}
@@ -682,15 +590,13 @@ const styles = StyleSheet.create({
     opacity: 0,
   },
   header: {
-    paddingHorizontal: 20,
-    paddingTop: 15,
-    paddingBottom: 15,
+    padding: 15,
     backgroundColor: "#fff",
     borderBottomWidth: 1,
     borderBottomColor: "#eee",
   },
   title: {
-    fontSize: 28,
+    fontSize: 24,
     fontWeight: "bold",
     color: "#ff3b5c",
     marginBottom: 10,
@@ -720,7 +626,6 @@ const styles = StyleSheet.create({
   tabButton: {
     flex: 1,
     alignItems: "center",
-    justifyContent: "center",
     paddingVertical: 15,
     borderBottomWidth: 2,
     borderBottomColor: "transparent",
@@ -729,70 +634,52 @@ const styles = StyleSheet.create({
     borderBottomColor: "#ff3b5c",
   },
   tabText: {
-    fontSize: 15,
-    fontWeight: "500",
+    fontSize: 16,
     color: "#888",
   },
   activeTabText: {
     color: "#ff3b5c",
+    fontWeight: "bold",
   },
   loaderContainer: {
     flex: 1,
     justifyContent: "center",
     alignItems: "center",
   },
-  loaderText: {
-    marginTop: 10,
-    fontSize: 16,
-    color: "#888",
-  },
   emptyContainer: {
     flex: 1,
     justifyContent: "center",
     alignItems: "center",
-    padding: 20,
   },
   emptyText: {
-    fontSize: 18,
-    color: "#888",
     marginTop: 10,
-  },
-  emptySubtext: {
-    fontSize: 14,
-    color: "#aaa",
-    marginTop: 5,
-    textAlign: "center",
+    fontSize: 16,
+    color: "#888",
   },
   trackList: {
-    paddingHorizontal: 20,
-    paddingTop: 10,
-    paddingBottom: Platform.OS === "ios" ? 130 : 150,
+    paddingBottom: 150,
   },
   trackItem: {
     flexDirection: "row",
     alignItems: "center",
-    paddingVertical: 12,
+    padding: 10,
     borderBottomWidth: 1,
     borderBottomColor: "#eee",
   },
   activeTrackItem: {
-    backgroundColor: "rgba(255, 59, 92, 0.05)",
-    borderRadius: 8,
-    paddingHorizontal: 8,
+    backgroundColor: "rgba(255, 59, 92, 0.1)",
   },
   thumbnail: {
-    width: 55,
-    height: 55,
-    borderRadius: 6,
+    width: 50,
+    height: 50,
+    borderRadius: 5,
   },
   trackInfo: {
     flex: 1,
-    marginLeft: 15,
-    justifyContent: "center",
+    marginLeft: 10,
   },
   trackTitle: {
     fontSize: 16,
-    fontWeight: "500",
     color: "#333",
   },
   activeText: {
@@ -802,13 +689,9 @@ const styles = StyleSheet.create({
   artistName: {
     fontSize: 14,
     color: "#888",
-    marginTop: 2,
   },
   favoriteButton: {
-    padding: 8,
-  },
-  footerLoader: {
-    marginVertical: 20,
+    padding: 5,
   },
   playerContainer: {
     position: "absolute",
@@ -819,27 +702,20 @@ const styles = StyleSheet.create({
     backgroundColor: "#fff",
     borderTopWidth: 1,
     borderTopColor: "#eee",
-    borderTopLeftRadius: 15,
-    borderTopRightRadius: 15,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: -3 },
-    shadowOpacity: 0.1,
-    shadowRadius: 5,
-    elevation: 10,
   },
   nowPlayingBar: {
     flexDirection: "row",
     alignItems: "center",
-    marginBottom: 15,
+    marginBottom: 10,
   },
   playerThumbnail: {
-    width: 55,
-    height: 55,
-    borderRadius: 6,
+    width: 50,
+    height: 50,
+    borderRadius: 5,
   },
   nowPlayingInfo: {
     flex: 1,
-    marginLeft: 15,
+    marginLeft: 10,
   },
   nowPlayingTitle: {
     fontSize: 16,
@@ -849,12 +725,11 @@ const styles = StyleSheet.create({
   nowPlayingArtist: {
     fontSize: 14,
     color: "#666",
-    marginTop: 2,
   },
   progressContainer: {
     flexDirection: "row",
     alignItems: "center",
-    marginBottom: 10,
+    marginVertical: 10,
   },
   progressBar: {
     flex: 1,
@@ -864,16 +739,14 @@ const styles = StyleSheet.create({
   timeText: {
     fontSize: 12,
     color: "#888",
-    width: 35,
+    width: 40,
     textAlign: "center",
   },
   controls: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-  },
-  controlButton: {
-    padding: 10,
+    paddingHorizontal: 20,
   },
   playButton: {
     width: 60,
