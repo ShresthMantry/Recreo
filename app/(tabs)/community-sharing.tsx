@@ -19,7 +19,9 @@ import { format } from "date-fns";
 import { createClient } from "@supabase/supabase-js";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as ImagePicker from "expo-image-picker";
+import * as FileSystem from 'expo-file-system';
 import * as Haptics from "expo-haptics";
+import { decode } from 'base64-arraybuffer';
 
 // Initialize Supabase client
 const supabase = createClient(
@@ -31,7 +33,7 @@ const supabase = createClient(
       autoRefreshToken: true,
       persistSession: true,
       detectSessionInUrl: false,
-    },
+    }
   }
 );
 
@@ -76,25 +78,51 @@ export default function CommunitySharing() {
   };
 
   const handleError = (error: any) => {
-    console.error(error);
+    console.error("Error details:", {
+      message: error.message,
+      code: error.code,
+      stack: error.stack,
+      timestamp: new Date().toISOString()
+    });
     Alert.alert("Error", error.message || "An unexpected error occurred");
+  };
+
+  const getImageUrl = (path: string) => {
+    return `https://ysavghvmswenmddlnshr.supabase.co/storage/v1/object/public/community-images/${path}`;
   };
 
   const uploadImage = async (uri: string) => {
     try {
-      const response = await fetch(uri);
-      const blob = await response.blob();
+      console.log("Starting image upload, URI:", uri);
+      
+      // Read the file as base64
+      const base64 = await FileSystem.readAsStringAsync(uri, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+      
       const fileExt = uri.split('.').pop()?.toLowerCase() || 'jpg';
       const fileName = `${user?.email}/${Date.now()}.${fileExt}`;
-
+      
+      console.log("Uploading to Supabase with path:", fileName);
+      
       const { data, error } = await supabase.storage
         .from("community-images")
-        .upload(fileName, blob);
+        .upload(fileName, decode(base64), {
+          contentType: `image/${fileExt}`,
+          upsert: false,
+          cacheControl: '3600',
+        });
 
-      if (error) throw error;
+      if (error) {
+        console.error("Supabase upload error:", error);
+        throw error;
+      }
+      
+      console.log("Upload successful:", data);
       return fileName;
     } catch (error) {
-      throw new Error("Failed to upload image");
+      console.error("Upload image error:", error);
+      throw new Error(`Failed to upload image: ${error instanceof Error ? error.message : String(error)}`);
     }
   };
 
@@ -121,7 +149,14 @@ export default function CommunitySharing() {
         .order("created_at", { ascending: false });
 
       if (error) throw error;
-      setPosts(data || []);
+      
+      // Enhance posts with full image URLs
+      const postsWithImages = data?.map(post => ({
+        ...post,
+        image_url: post.image_url ? getImageUrl(post.image_url) : null
+      })) || [];
+      
+      setPosts(postsWithImages);
     } catch (error) {
       handleError(error);
     } finally {
@@ -152,14 +187,21 @@ export default function CommunitySharing() {
 
   const pickImage = async () => {
     try {
+      const permissionResult = await ImagePicker.requestMediaLibraryPermissionsAsync();
+  
+      if (!permissionResult.granted) {
+        Alert.alert("Permission Denied", "You need to allow access to your media library to pick an image.");
+        return;
+      }
+  
       const result = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ImagePicker.MediaTypeOptions.Images,
         allowsEditing: true,
         aspect: [4, 3],
-        quality: 1,
+        quality: 0.8,
       });
-
-      if (!result.canceled && result.assets[0]) {
+  
+      if (!result.canceled && result.assets && result.assets.length > 0) {
         setImage(result.assets[0].uri);
       }
     } catch (error) {
@@ -168,50 +210,77 @@ export default function CommunitySharing() {
   };
 
   const createPost = async () => {
-    try {
-      if (!user?.email || !newPostContent.trim()) return;
+    if (!user?.email || !newPostContent.trim()) return;
 
-      const tempId = generateTempId();
-      const username = user.name || user.email.split("@")[0] || "Anonymous";
-      
-      const optimisticPost: Post = {
-        id: tempId,
-        user_email: user.email,
-        username,
-        content: newPostContent,
-        image_url: image,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      };
+    const tempId = generateTempId();
+    const username = user.name || user.email.split("@")[0] || "Anonymous";
+    
+    // Create optimistic post (without image URL first)
+    const optimisticPost: Post = {
+      id: tempId,
+      user_email: user.email,
+      username,
+      content: newPostContent,
+      image_url: null, // Will be updated after upload
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
 
-      setPosts(prev => [optimisticPost, ...prev]);
-      setNewPostContent("");
-      setImage(null);
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    setPosts(prev => [optimisticPost, ...prev]);
+    setNewPostContent("");
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
 
-      let imageUrl = null;
-      if (image) {
+    let imageUrl: string | null = null;
+    if (image) {
+      try {
         setUploading(true);
         imageUrl = await uploadImage(image);
+        console.log("Image uploaded successfully:", imageUrl);
+        
+        // Update the optimistic post with the image URL
+        setPosts(prev => prev.map(post => 
+          post.id === tempId ? { ...post, image_url: imageUrl ? getImageUrl(imageUrl) : null } : post
+        ));
+      } catch (uploadError) {
+        console.error("Image upload failed:", uploadError);
+        Alert.alert(
+          "Image Upload Failed",
+          "Your post was created without the image.",
+          [{ text: "OK" }]
+        );
+      } finally {
         setUploading(false);
+        setImage(null);
       }
+    }
 
+    // Create the actual post in database
+    try {
       const { data, error } = await supabase
         .from("community_posts")
         .insert([{
           user_email: user.email,
           username,
           content: newPostContent,
-          image_url: imageUrl,
+          image_url: imageUrl, // This is the storage path, not full URL
         }])
         .select();
 
       if (error) throw error;
 
-      setPosts(prev => prev.map(post => post.id === tempId ? data[0] : post));
+      console.log("Post created successfully:", data[0]);
+      
+      // Replace optimistic post with actual post from database
+      setPosts(prev => prev.map(post => 
+        post.id === tempId ? { 
+          ...data[0], 
+          image_url: data[0].image_url ? getImageUrl(data[0].image_url) : null 
+        } : post
+      ));
     } catch (error) {
       handleError(error);
-      setPosts(prev => prev.filter(post => post.id.startsWith('temp-')));
+      // Remove the optimistic post if creation failed
+      setPosts(prev => prev.filter(post => post.id !== tempId));
     }
   };
 
@@ -265,6 +334,10 @@ export default function CommunitySharing() {
             text: "Delete",
             style: "destructive",
             onPress: async () => {
+              // Find the post to get the image_url before deleting
+              const postToDelete = posts.find(post => post.id === postId);
+              
+              // Optimistic update
               setPosts(prev => prev.filter(post => post.id !== postId));
               if (selectedPostId === postId) {
                 setSelectedPostId(null);
@@ -272,12 +345,26 @@ export default function CommunitySharing() {
               }
               Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
 
+              // Delete from database
               const { error } = await supabase
                 .from("community_posts")
                 .delete()
                 .eq("id", postId);
 
               if (error) throw error;
+              
+              // Delete the image from storage if it exists
+              if (postToDelete?.image_url) {
+                try {
+                  const imagePath = postToDelete.image_url.replace('https://ysavghvmswenmddlnshr.supabase.co/storage/v1/object/public/community-images/', '');
+                  await supabase.storage
+                    .from("community-images")
+                    .remove([imagePath]);
+                } catch (imageDeleteError) {
+                  console.error("Failed to delete image:", imageDeleteError);
+                  // Continue anyway as the post is already deleted
+                }
+              }
             },
           },
         ]
@@ -366,7 +453,10 @@ export default function CommunitySharing() {
               </TouchableOpacity>
               <TouchableOpacity
                 onPress={createPost}
-                style={styles.postButton}
+                style={[
+                  styles.postButton,
+                  (!newPostContent.trim() || uploading) && styles.disabledButton,
+                ]}
                 disabled={uploading || !newPostContent.trim()}
               >
                 {uploading ? (
@@ -409,9 +499,7 @@ export default function CommunitySharing() {
                   </View>
                   {item.image_url && (
                     <Image
-                      source={{
-                        uri: `https://your-project.supabase.co/storage/v1/object/public/community-images/${item.image_url}`,
-                      }}
+                      source={{ uri: item.image_url }}
                       style={styles.postImage}
                       resizeMode="cover"
                     />
@@ -482,7 +570,10 @@ export default function CommunitySharing() {
             />
             <TouchableOpacity
               onPress={addComment}
-              style={styles.commentPostButton}
+              style={[
+                styles.commentPostButton,
+                !newCommentContent.trim() && styles.disabledButton,
+              ]}
               disabled={!newCommentContent.trim()}
             >
               <Text style={styles.commentPostButtonText}>Post</Text>
@@ -574,6 +665,10 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 8,
     borderRadius: 8,
+  },
+  disabledButton: {
+    backgroundColor: "#4B3385",
+    opacity: 0.7,
   },
   postButtonText: {
     color: "#ffffff",
