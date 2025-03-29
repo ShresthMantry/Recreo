@@ -1,46 +1,56 @@
-import React, { useState, useEffect } from "react";
-import { 
-  View, 
-  Text, 
-  StyleSheet, 
-  TouchableOpacity, 
-  FlatList, 
+import React, { useState, useEffect, useRef } from "react";
+import {
+  View,
+  Text,
+  StyleSheet,
+  TouchableOpacity,
+  FlatList,
   Modal,
   Alert,
   ActivityIndicator,
   Dimensions,
   Image,
-  GestureResponderEvent
+  PanResponder,
+  Platform,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { createClient } from "@supabase/supabase-js";
-import { Canvas, Path, useCanvasRef, Skia, ImageFormat, SkPath } from "@shopify/react-native-skia";
-import * as FileSystem from "expo-file-system";
 import * as Haptics from "expo-haptics";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { captureRef } from "react-native-view-shot";
+import * as FileSystem from "expo-file-system";
+import Svg, { Path } from "react-native-svg";
 
-// Supabase credentials
+// Supabase configuration
 const supabaseUrl = "https://ysavghvmswenmddlnshr.supabase.co";
 const supabaseKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlzYXZnaHZtc3dlbm1kZGxuc2hyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDI5OTY4MzIsImV4cCI6MjA1ODU3MjgzMn0.GCQ0xl7wJKI_YB8d3PP1jBDcs-aRJLRLjk9-NdB1_bs";
 const supabase = createClient(supabaseUrl, supabaseKey);
 
-// Define the interface for Drawing
+// Type definitions
 interface Drawing {
   id: number;
-  paths: string;
-  thumbnail: string | null | undefined;
+  paths: PathData[];
+  thumbnail: string | null;
   created_at: string;
   updated_at?: string;
 }
 
-// Define the interface for Path
 interface PathData {
-  path: SkPath;
+  path: string;
   color: string;
   strokeWidth: number;
+  isEraser?: boolean;
 }
 
-export default function Drawing() {
+interface CurrentPath {
+  path: string;
+  color: string;
+  strokeWidth: number;
+  isEraser?: boolean;
+}
+
+export default function DrawingApp() {
+  // State management
   const [drawings, setDrawings] = useState<Drawing[]>([]);
   const [loading, setLoading] = useState(true);
   const [currentPaths, setCurrentPaths] = useState<PathData[]>([]);
@@ -49,13 +59,66 @@ export default function Drawing() {
   const [editMode, setEditMode] = useState(false);
   const [color, setColor] = useState("#ffffff");
   const [strokeWidth, setStrokeWidth] = useState(5);
+  const [isEraser, setIsEraser] = useState(false);
+  
+  // Refs
+  const canvasRef = useRef<View>(null);
+  const pathsRef = useRef<CurrentPath[]>([]);
+  const currentPathRef = useRef<CurrentPath | null>(null);
+  
+  // UI measurements
   const insets = useSafeAreaInsets();
-  const canvasRef = useCanvasRef();
   const { width, height } = Dimensions.get("window");
   const canvasHeight = height * 0.65;
 
+  // Color options for the palette
   const colorOptions = ["#ffffff", "#ff5252", "#4fc3f7", "#9ccc65", "#ffb74d", "#ba68c8"];
 
+  // PanResponder for drawing
+  const panResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onPanResponderGrant: (e) => {
+        const { locationX: x, locationY: y } = e.nativeEvent;
+        currentPathRef.current = {
+          path: `M${x},${y}`,
+          color: isEraser ? "#1a1a1a" : color,
+          strokeWidth: isEraser ? strokeWidth * 2 : strokeWidth,
+          isEraser
+        };
+      },
+      onPanResponderMove: (e) => {
+        const { locationX: x, locationY: y } = e.nativeEvent;
+        if (!currentPathRef.current) return;
+        
+        currentPathRef.current.path += ` L${x},${y}`;
+        
+        // Update the display with the current path
+        setCurrentPaths([
+          ...pathsRef.current,
+          {
+            ...currentPathRef.current,
+            path: currentPathRef.current.path
+          }
+        ]);
+      },
+      onPanResponderRelease: () => {
+        if (!currentPathRef.current) return;
+        
+        pathsRef.current = [
+          ...pathsRef.current,
+          {
+            ...currentPathRef.current
+          }
+        ];
+        setCurrentPaths(pathsRef.current);
+        currentPathRef.current = null;
+      },
+    })
+  ).current;
+
+  // Fetch drawings on component mount
   useEffect(() => {
     fetchDrawings();
   }, []);
@@ -69,7 +132,14 @@ export default function Drawing() {
         .order("created_at", { ascending: false });
 
       if (error) throw error;
-      setDrawings(data || []);
+      
+      // Parse the paths data
+      const parsedData = (data || []).map(drawing => ({
+        ...drawing,
+        paths: JSON.parse(drawing.paths)
+      }));
+      
+      setDrawings(parsedData);
     } catch (error) {
       console.error("Error fetching drawings:", error);
       Alert.alert("Error", "Failed to load drawings");
@@ -79,49 +149,32 @@ export default function Drawing() {
   };
 
   const handleNewDrawing = () => {
+    pathsRef.current = [];
+    currentPathRef.current = null;
     setCurrentPaths([]);
     setCurrentDrawing(null);
     setEditMode(false);
+    setIsEraser(false);
     setModalVisible(true);
+    vibrate();
   };
 
-  const handleEditDrawing = (drawing: Drawing): void => {
-    setCurrentDrawing(drawing);
+  const handleEditDrawing = (drawing: Drawing) => {
     try {
-      // Parse the paths and create valid Skia paths
-      const parsedPaths = JSON.parse(drawing.paths).map((p: any) => {
-        const skPath = Skia.Path.Make();
-        
-        if (p.path) {
-          // Try to create from SVG string if possible
-          const svgPath = Skia.Path.MakeFromSVGString(p.path);
-          if (svgPath) {
-            return {
-              path: svgPath,
-              color: p.color,
-              strokeWidth: p.strokeWidth
-            };
-          }
-        }
-        
-        // Return default path if SVG parsing fails
-        return {
-          path: skPath,
-          color: p.color,
-          strokeWidth: p.strokeWidth
-        };
-      });
-      
-      setCurrentPaths(parsedPaths);
+      setCurrentDrawing(drawing);
+      pathsRef.current = [...drawing.paths];
+      setCurrentPaths(drawing.paths);
       setEditMode(true);
+      setIsEraser(false);
       setModalVisible(true);
+      vibrate();
     } catch (error) {
-      console.error("Error parsing paths:", error);
+      console.error("Error loading drawing:", error);
       Alert.alert("Error", "Failed to load drawing");
     }
   };
 
-  const handleDeleteDrawing = async (id: number): Promise<void> => {
+  const handleDeleteDrawing = async (id: number) => {
     Alert.alert(
       "Delete Drawing",
       "Are you sure you want to delete this drawing?",
@@ -140,8 +193,8 @@ export default function Drawing() {
 
               if (error) throw error;
               
-              setDrawings(drawings.filter((drawing) => drawing.id !== id));
-              Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+              setDrawings(drawings.filter(drawing => drawing.id !== id));
+              notifySuccess();
             } catch (error) {
               console.error("Error deleting drawing:", error);
               Alert.alert("Error", "Failed to delete drawing");
@@ -154,41 +207,52 @@ export default function Drawing() {
     );
   };
 
+  const captureCanvas = async (): Promise<string | null> => {
+    try {
+      if (!canvasRef.current) return null;
+      
+      const uri = await captureRef(canvasRef, {
+        format: "png",
+        quality: 0.8,
+      });
+      
+      return uri;
+    } catch (error) {
+      console.error("Error capturing canvas:", error);
+      return null;
+    }
+  };
+
   const saveDrawing = async () => {
     try {
-      if (currentPaths.length === 0) {
+      if (pathsRef.current.length === 0) {
         Alert.alert("Error", "Cannot save an empty drawing");
         return;
       }
 
       setLoading(true);
       
-      // Generate a thumbnail from the canvas
-      const snapshot = canvasRef.current?.makeImageSnapshot();
-      let base64 = null;
+      // Capture the canvas as an image
+      const thumbnailUri = await captureCanvas();
+      let thumbnailBase64 = null;
       
-      if (snapshot) {
-        const image = snapshot.encodeToBase64(ImageFormat.PNG, 100);
-        if (image) {
-          base64 = image;
-        }
+      if (thumbnailUri) {
+        const base64 = await FileSystem.readAsStringAsync(thumbnailUri, {
+          encoding: FileSystem.EncodingType.Base64,
+        });
+        thumbnailBase64 = base64;
       }
       
-      // Convert paths to a format that can be stored
-      const pathsString = JSON.stringify(currentPaths.map(p => ({
-        path: p.path.toSVGString(),
-        color: p.color,
-        strokeWidth: p.strokeWidth
-      })));
-      
+      const pathsToSave = pathsRef.current;
       const timestamp = new Date().toISOString();
       
       if (editMode && currentDrawing) {
+        // Update existing drawing
         const { error } = await supabase
           .from("drawings1")
           .update({
-            paths: pathsString,
-            thumbnail: base64,
+            paths: JSON.stringify(pathsToSave),
+            thumbnail: thumbnailBase64,
             updated_at: timestamp
           })
           .eq("id", currentDrawing.id);
@@ -197,15 +261,21 @@ export default function Drawing() {
         
         setDrawings(drawings.map(drawing => 
           drawing.id === currentDrawing.id 
-            ? { ...drawing, paths: pathsString, thumbnail: base64, updated_at: timestamp }
+            ? { 
+                ...drawing, 
+                paths: pathsToSave, 
+                thumbnail: thumbnailBase64, 
+                updated_at: timestamp 
+              }
             : drawing
         ));
       } else {
+        // Create new drawing
         const { data, error } = await supabase
           .from("drawings1")
           .insert({
-            paths: pathsString,
-            thumbnail: base64,
+            paths: JSON.stringify(pathsToSave),
+            thumbnail: thumbnailBase64,
             created_at: timestamp,
             updated_at: timestamp
           })
@@ -213,12 +283,16 @@ export default function Drawing() {
 
         if (error) throw error;
         
-        if (data && data.length > 0) {
-          setDrawings([data[0], ...drawings]);
+        if (data?.[0]) {
+          const newDrawing = {
+            ...data[0],
+            paths: pathsToSave
+          };
+          setDrawings([newDrawing, ...drawings]);
         }
       }
 
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      notifySuccess();
       setModalVisible(false);
     } catch (error) {
       console.error("Error saving drawing:", error);
@@ -228,29 +302,32 @@ export default function Drawing() {
     }
   };
 
-  const onTouchStart = (event: GestureResponderEvent): void => {
-    const { locationX: x, locationY: y } = event.nativeEvent;
-    const newPath = Skia.Path.Make();
-    newPath.moveTo(x, y);
-    setCurrentPaths([...currentPaths, { path: newPath, color, strokeWidth }]);
-  };
-
-  const onTouchMove = (event: GestureResponderEvent): void => {
-    const { locationX: x, locationY: y } = event.nativeEvent;
-    
-    if (currentPaths.length === 0) return;
-    
-    const lastIndex = currentPaths.length - 1;
-    const newPaths = [...currentPaths];
-    const currentPath = newPaths[lastIndex].path;
-    currentPath.lineTo(x, y);
-    setCurrentPaths(newPaths);
-  };
-
   const clearCanvas = () => {
+    pathsRef.current = [];
+    currentPathRef.current = null;
     setCurrentPaths([]);
+    vibrate();
   };
 
+  const toggleEraser = () => {
+    setIsEraser(!isEraser);
+    vibrate();
+  };
+
+  // Helper functions for haptic feedback
+  const vibrate = () => {
+    if (Platform.OS === "android") {
+      Haptics.selectionAsync();
+    }
+  };
+
+  const notifySuccess = () => {
+    if (Platform.OS === "android") {
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    }
+  };
+
+  // Render functions
   const renderDrawingItem = ({ item }: { item: Drawing }) => (
     <TouchableOpacity 
       style={styles.drawingItem}
@@ -265,7 +342,10 @@ export default function Drawing() {
           />
           <TouchableOpacity 
             style={styles.deleteButton}
-            onPress={() => handleDeleteDrawing(item.id)}
+            onPress={(e) => {
+              e.stopPropagation();
+              handleDeleteDrawing(item.id);
+            }}
           >
             <Ionicons name="trash-outline" size={18} color="#fff" />
           </TouchableOpacity>
@@ -281,6 +361,18 @@ export default function Drawing() {
     </TouchableOpacity>
   );
 
+  const renderPath = ({ path, color, strokeWidth, isEraser }: PathData, index: number) => (
+    <Path
+      key={index}
+      d={path}
+      stroke={color}
+      strokeWidth={strokeWidth}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      fill="none"
+    />
+  );
+
   return (
     <View style={[styles.container, { paddingBottom: insets.bottom }]}>
       <Text style={styles.title}>My Drawings</Text>
@@ -291,24 +383,22 @@ export default function Drawing() {
           <Text style={styles.loadingText}>Loading your artwork...</Text>
         </View>
       ) : (
-        <View style={styles.contentContainer}>
-          <FlatList
-            data={drawings}
-            renderItem={renderDrawingItem}
-            keyExtractor={(item) => item.id.toString()}
-            numColumns={2}
-            contentContainerStyle={styles.drawingsList}
-            ListEmptyComponent={
-              <View style={styles.emptyState}>
-                <Ionicons name="brush-outline" size={48} color="#9ca3af" />
-                <Text style={styles.emptyStateText}>No drawings yet</Text>
-                <Text style={styles.emptyStateSubtext}>
-                  Create your first masterpiece
-                </Text>
-              </View>
-            }
-          />
-        </View>
+        <FlatList
+          data={drawings}
+          renderItem={renderDrawingItem}
+          keyExtractor={(item) => item.id.toString()}
+          numColumns={2}
+          contentContainerStyle={styles.drawingsList}
+          ListEmptyComponent={
+            <View style={styles.emptyState}>
+              <Ionicons name="brush-outline" size={48} color="#9ca3af" />
+              <Text style={styles.emptyStateText}>No drawings yet</Text>
+              <Text style={styles.emptyStateSubtext}>
+                Tap the + button to create your first masterpiece
+              </Text>
+            </View>
+          }
+        />
       )}
       
       <TouchableOpacity 
@@ -340,39 +430,45 @@ export default function Drawing() {
             </View>
 
             <View 
+              ref={canvasRef}
               style={[styles.canvasContainer, { height: canvasHeight }]}
-              onTouchStart={onTouchStart}
-              onTouchMove={onTouchMove}
+              {...panResponder.panHandlers}
             >
-              <Canvas style={styles.canvas} ref={canvasRef}>
-                {currentPaths.map((item, index) => (
-                  <Path
-                    key={index}
-                    path={item.path}
-                    color={item.color}
-                    style="stroke"
-                    strokeWidth={item.strokeWidth}
-                  />
-                ))}
-              </Canvas>
+              <Svg style={styles.canvasBackground}>
+                {currentPaths.map(renderPath)}
+              </Svg>
             </View>
 
             <View style={styles.toolsContainer}>
-              <View style={styles.colorPicker}>
-                {colorOptions.map((c) => (
-                  <TouchableOpacity
-                    key={c}
-                    style={[
-                      styles.colorOption,
-                      { backgroundColor: c },
-                      color === c && styles.selectedColor,
-                    ]}
-                    onPress={() => {
-                      setColor(c);
-                      Haptics.selectionAsync();
-                    }}
-                  />
-                ))}
+              <View style={styles.toolRow}>
+                <View style={styles.colorPicker}>
+                  {colorOptions.map((c) => (
+                    <TouchableOpacity
+                      key={c}
+                      style={[
+                        styles.colorOption,
+                        { backgroundColor: c },
+                        color === c && !isEraser && styles.selectedColor,
+                      ]}
+                      onPress={() => {
+                        setColor(c);
+                        setIsEraser(false);
+                        vibrate();
+                      }}
+                    />
+                  ))}
+                </View>
+
+                <TouchableOpacity
+                  style={[
+                    styles.eraserButton,
+                    isEraser && styles.eraserButtonActive
+                  ]}
+                  onPress={toggleEraser}
+                >
+                  <Ionicons name="trash-outline" size={20} color={isEraser ? "#7c3aed" : "#ffffff"} />
+                  <Text style={[styles.buttonText, isEraser && { color: "#7c3aed" }]}>Eraser</Text>
+                </TouchableOpacity>
               </View>
 
               <View style={styles.strokePicker}>
@@ -385,7 +481,7 @@ export default function Drawing() {
                     ]}
                     onPress={() => {
                       setStrokeWidth(width);
-                      Haptics.selectionAsync();
+                      vibrate();
                     }}
                   >
                     <View
@@ -393,7 +489,8 @@ export default function Drawing() {
                         styles.strokeSample,
                         { 
                           height: width, 
-                          backgroundColor: color 
+                          backgroundColor: isEraser ? "#7c3aed" : color,
+                          width: width * 2,
                         },
                       ]}
                     />
@@ -414,9 +511,16 @@ export default function Drawing() {
               <TouchableOpacity
                 style={styles.saveButton}
                 onPress={saveDrawing}
+                disabled={loading}
               >
-                <Ionicons name="save-outline" size={20} color="#ffffff" />
-                <Text style={styles.buttonText}>Save</Text>
+                {loading ? (
+                  <ActivityIndicator color="#ffffff" />
+                ) : (
+                  <>
+                    <Ionicons name="save-outline" size={20} color="#ffffff" />
+                    <Text style={styles.buttonText}>Save</Text>
+                  </>
+                )}
               </TouchableOpacity>
             </View>
           </View>
@@ -426,6 +530,7 @@ export default function Drawing() {
   );
 }
 
+// Styles
 const styles = StyleSheet.create({
   container: {
     flex: 1,
@@ -438,9 +543,6 @@ const styles = StyleSheet.create({
     color: "#ffffff",
     marginBottom: 16,
     marginTop: 8,
-  },
-  contentContainer: {
-    flex: 1,
   },
   drawingsList: {
     paddingBottom: 80,
@@ -535,9 +637,9 @@ const styles = StyleSheet.create({
     margin: 8,
     overflow: "hidden",
   },
-  canvas: {
-    width: "100%",
-    height: "100%",
+  canvasBackground: {
+    flex: 1,
+    backgroundColor: "#1a1a1a",
   },
   toolsContainer: {
     padding: 16,
@@ -545,10 +647,17 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     margin: 8,
   },
+  toolRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 16,
+  },
   colorPicker: {
     flexDirection: "row",
     justifyContent: "space-around",
-    marginBottom: 16,
+    flex: 1,
+    marginRight: 16,
   },
   colorOption: {
     width: 30,
@@ -560,6 +669,20 @@ const styles = StyleSheet.create({
   selectedColor: {
     borderColor: "#7c3aed",
     transform: [{ scale: 1.2 }],
+  },
+  eraserButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    backgroundColor: "#2a2a2a",
+  },
+  eraserButtonActive: {
+    backgroundColor: "#3a3a3a",
+    borderWidth: 2,
+    borderColor: "#7c3aed",
   },
   strokePicker: {
     flexDirection: "row",
@@ -579,7 +702,6 @@ const styles = StyleSheet.create({
     borderColor: "#7c3aed",
   },
   strokeSample: {
-    width: "60%",
     borderRadius: 4,
   },
   actionButtons: {
