@@ -1,5 +1,4 @@
-// app/(tabs)/drawing.tsx
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect } from "react";
 import { 
   View, 
   Text, 
@@ -9,25 +8,43 @@ import {
   Modal,
   Alert,
   ActivityIndicator,
-  Dimensions
+  Dimensions,
+  Image,
+  GestureResponderEvent
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { createClient } from "@supabase/supabase-js";
-import { Canvas, Path, useCanvasRef } from "@shopify/react-native-skia";
+import { Canvas, Path, useCanvasRef, Skia, ImageFormat, SkPath } from "@shopify/react-native-skia";
 import * as FileSystem from "expo-file-system";
 import * as Haptics from "expo-haptics";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-// Replace with your Supabase credentials
-const supabaseUrl = "YOUR_SUPABASE_URL";
-const supabaseKey = "YOUR_SUPABASE_KEY";
+// Supabase credentials
+const supabaseUrl = "https://ysavghvmswenmddlnshr.supabase.co";
+const supabaseKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlzYXZnaHZtc3dlbm1kZGxuc2hyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDI5OTY4MzIsImV4cCI6MjA1ODU3MjgzMn0.GCQ0xl7wJKI_YB8d3PP1jBDcs-aRJLRLjk9-NdB1_bs";
 const supabase = createClient(supabaseUrl, supabaseKey);
 
+// Define the interface for Drawing
+interface Drawing {
+  id: number;
+  paths: string;
+  thumbnail: string | null | undefined;
+  created_at: string;
+  updated_at?: string;
+}
+
+// Define the interface for Path
+interface PathData {
+  path: SkPath;
+  color: string;
+  strokeWidth: number;
+}
+
 export default function Drawing() {
-  const [drawings, setDrawings] = useState([]);
+  const [drawings, setDrawings] = useState<Drawing[]>([]);
   const [loading, setLoading] = useState(true);
-  const [currentPaths, setCurrentPaths] = useState([]);
-  const [currentDrawing, setCurrentDrawing] = useState(null);
+  const [currentPaths, setCurrentPaths] = useState<PathData[]>([]);
+  const [currentDrawing, setCurrentDrawing] = useState<Drawing | null>(null);
   const [modalVisible, setModalVisible] = useState(false);
   const [editMode, setEditMode] = useState(false);
   const [color, setColor] = useState("#ffffff");
@@ -47,7 +64,7 @@ export default function Drawing() {
     try {
       setLoading(true);
       const { data, error } = await supabase
-        .from("drawings")
+        .from("drawings1")
         .select("*")
         .order("created_at", { ascending: false });
 
@@ -68,14 +85,43 @@ export default function Drawing() {
     setModalVisible(true);
   };
 
-  const handleEditDrawing = (drawing) => {
+  const handleEditDrawing = (drawing: Drawing): void => {
     setCurrentDrawing(drawing);
-    setCurrentPaths(JSON.parse(drawing.paths));
-    setEditMode(true);
-    setModalVisible(true);
+    try {
+      // Parse the paths and create valid Skia paths
+      const parsedPaths = JSON.parse(drawing.paths).map((p: any) => {
+        const skPath = Skia.Path.Make();
+        
+        if (p.path) {
+          // Try to create from SVG string if possible
+          const svgPath = Skia.Path.MakeFromSVGString(p.path);
+          if (svgPath) {
+            return {
+              path: svgPath,
+              color: p.color,
+              strokeWidth: p.strokeWidth
+            };
+          }
+        }
+        
+        // Return default path if SVG parsing fails
+        return {
+          path: skPath,
+          color: p.color,
+          strokeWidth: p.strokeWidth
+        };
+      });
+      
+      setCurrentPaths(parsedPaths);
+      setEditMode(true);
+      setModalVisible(true);
+    } catch (error) {
+      console.error("Error parsing paths:", error);
+      Alert.alert("Error", "Failed to load drawing");
+    }
   };
 
-  const handleDeleteDrawing = async (id) => {
+  const handleDeleteDrawing = async (id: number): Promise<void> => {
     Alert.alert(
       "Delete Drawing",
       "Are you sure you want to delete this drawing?",
@@ -88,14 +134,13 @@ export default function Drawing() {
             try {
               setLoading(true);
               const { error } = await supabase
-                .from("drawings")
+                .from("drawings1")
                 .delete()
                 .eq("id", id);
 
               if (error) throw error;
               
-              // Update local state
-              setDrawings(drawings.filter(drawing => drawing.id !== id));
+              setDrawings(drawings.filter((drawing) => drawing.id !== id));
               Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
             } catch (error) {
               console.error("Error deleting drawing:", error);
@@ -103,8 +148,8 @@ export default function Drawing() {
             } finally {
               setLoading(false);
             }
-          }
-        }
+          },
+        },
       ]
     );
   };
@@ -118,17 +163,29 @@ export default function Drawing() {
 
       setLoading(true);
       
-      // Take a snapshot of the canvas
-      const snapshot = await canvasRef.current?.makeImageSnapshot();
-      const base64 = snapshot ? await snapshot.encodeToBase64() : null;
+      // Generate a thumbnail from the canvas
+      const snapshot = canvasRef.current?.makeImageSnapshot();
+      let base64 = null;
       
-      const pathsString = JSON.stringify(currentPaths);
+      if (snapshot) {
+        const image = snapshot.encodeToBase64(ImageFormat.PNG, 100);
+        if (image) {
+          base64 = image;
+        }
+      }
+      
+      // Convert paths to a format that can be stored
+      const pathsString = JSON.stringify(currentPaths.map(p => ({
+        path: p.path.toSVGString(),
+        color: p.color,
+        strokeWidth: p.strokeWidth
+      })));
+      
       const timestamp = new Date().toISOString();
       
       if (editMode && currentDrawing) {
-        // Update existing drawing
         const { error } = await supabase
-          .from("drawings")
+          .from("drawings1")
           .update({
             paths: pathsString,
             thumbnail: base64,
@@ -138,16 +195,14 @@ export default function Drawing() {
 
         if (error) throw error;
         
-        // Update local state
         setDrawings(drawings.map(drawing => 
           drawing.id === currentDrawing.id 
             ? { ...drawing, paths: pathsString, thumbnail: base64, updated_at: timestamp }
             : drawing
         ));
       } else {
-        // Create new drawing
         const { data, error } = await supabase
-          .from("drawings")
+          .from("drawings1")
           .insert({
             paths: pathsString,
             thumbnail: base64,
@@ -158,7 +213,6 @@ export default function Drawing() {
 
         if (error) throw error;
         
-        // Update local state
         if (data && data.length > 0) {
           setDrawings([data[0], ...drawings]);
         }
@@ -174,38 +228,30 @@ export default function Drawing() {
     }
   };
 
-  const onTouchStart = (event) => {
-    const { x, y } = event.nativeEvent;
-    const newPath = {
-      path: `M ${x} ${y}`,
-      color,
-      strokeWidth
-    };
-    setCurrentPaths([...currentPaths, newPath]);
+  const onTouchStart = (event: GestureResponderEvent): void => {
+    const { locationX: x, locationY: y } = event.nativeEvent;
+    const newPath = Skia.Path.Make();
+    newPath.moveTo(x, y);
+    setCurrentPaths([...currentPaths, { path: newPath, color, strokeWidth }]);
   };
 
-  const onTouchMove = (event) => {
-    const { x, y } = event.nativeEvent;
+  const onTouchMove = (event: GestureResponderEvent): void => {
+    const { locationX: x, locationY: y } = event.nativeEvent;
     
     if (currentPaths.length === 0) return;
     
     const lastIndex = currentPaths.length - 1;
-    const lastPath = currentPaths[lastIndex];
-    const newPath = {
-      ...lastPath,
-      path: `${lastPath.path} L ${x} ${y}`
-    };
-    
-    const updatedPaths = [...currentPaths];
-    updatedPaths[lastIndex] = newPath;
-    setCurrentPaths(updatedPaths);
+    const newPaths = [...currentPaths];
+    const currentPath = newPaths[lastIndex].path;
+    currentPath.lineTo(x, y);
+    setCurrentPaths(newPaths);
   };
 
   const clearCanvas = () => {
     setCurrentPaths([]);
   };
 
-  const renderDrawingItem = ({ item }) => (
+  const renderDrawingItem = ({ item }: { item: Drawing }) => (
     <TouchableOpacity 
       style={styles.drawingItem}
       onPress={() => handleEditDrawing(item)}
@@ -213,15 +259,10 @@ export default function Drawing() {
     >
       {item.thumbnail ? (
         <View style={styles.thumbnailContainer}>
-          <View style={styles.thumbnail}>
-            {item.thumbnail && (
-              <img 
-                src={`data:image/png;base64,${item.thumbnail}`} 
-                style={{ width: '100%', height: '100%', borderRadius: 8 }}
-                alt="Drawing thumbnail"
-              />
-            )}
-          </View>
+          <Image 
+            source={{ uri: `data:image/png;base64,${item.thumbnail}` }}
+            style={styles.thumbnail}
+          />
           <TouchableOpacity 
             style={styles.deleteButton}
             onPress={() => handleDeleteDrawing(item.id)}
@@ -304,13 +345,13 @@ export default function Drawing() {
               onTouchMove={onTouchMove}
             >
               <Canvas style={styles.canvas} ref={canvasRef}>
-                {currentPaths.map((path, index) => (
+                {currentPaths.map((item, index) => (
                   <Path
                     key={index}
-                    path={path.path}
-                    color={path.color}
+                    path={item.path}
+                    color={item.color}
                     style="stroke"
-                    strokeWidth={path.strokeWidth}
+                    strokeWidth={item.strokeWidth}
                   />
                 ))}
               </Canvas>
@@ -420,9 +461,7 @@ const styles = StyleSheet.create({
   thumbnail: {
     width: "100%",
     height: "100%",
-    backgroundColor: "#2a2a2a",
-    justifyContent: "center",
-    alignItems: "center",
+    borderRadius: 8,
   },
   emptyThumbnail: {
     width: "100%",
@@ -600,10 +639,6 @@ const styles = StyleSheet.create({
   },
   loadingText: {
     marginTop: 16,
-    fontSize: 16,
-    color: "#9ca3af",
-  },
-  subtitle: {
     fontSize: 16,
     color: "#9ca3af",
   },
