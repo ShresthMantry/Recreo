@@ -1,4 +1,3 @@
-// app/(tabs)/_layout.tsx
 import React, { useEffect, useState } from "react";
 import { Tabs } from "expo-router";
 import { useAuth } from "../../context/AuthContext";
@@ -7,8 +6,6 @@ import { Redirect } from "expo-router";
 
 export default function TabsLayout() {
   const { user } = useAuth();
-
-  // State to manage tab screens dynamically
   const [activityTabs, setActivityTabs] = useState<string[]>([]);
 
   // Redirect to login if not authenticated
@@ -19,11 +16,25 @@ export default function TabsLayout() {
   const isAdmin = user.role === "admin";
   const activities = user.activities || [];
 
-  // Update activity tabs when user.activities changes
+  // Update activity tabs and remove duplicates
   useEffect(() => {
-    setActivityTabs(activities);
-    console.log(activities);
+    // Normalize activity names and remove duplicates
+    const normalizedActivities = activities.map(activity => 
+      activity.toLowerCase().replace(" ", "-")
+    );
+    const uniqueActivities = [...new Set(normalizedActivities)];
+    setActivityTabs(uniqueActivities);
   }, [activities]);
+
+  // All possible activity routes that exist in the app
+  const allPossibleActivities = [
+    "music",
+    "drawing",
+    "books",
+    "journal",
+    "community-sharing",
+    "games"
+  ];
 
   return (
     <Tabs
@@ -37,6 +48,7 @@ export default function TabsLayout() {
         tabBarInactiveTintColor: "#9ca3af",
       }}
     >
+      {/* Core tabs that always appear */}
       <Tabs.Screen
         name="index"
         options={{
@@ -47,46 +59,62 @@ export default function TabsLayout() {
         }}
       />
 
-      {activityTabs.map((activity, index) => {
-        // Map activity to a corresponding route name
-        const routeName = activity.toLowerCase().replace(" ", "-");
-
-        // Ensure the route exists in your file structure
-        const validRoutes = ["music", "drawing", "books", "journal", "community-sharing", "games"];
-        if (!validRoutes.includes(routeName)) {
-          return null; // Skip if the route doesn't exist
+      {/* Dynamically show selected activities */}
+      {activityTabs.map((activity) => {
+        // Skip if activity isn't in our valid routes
+        if (!allPossibleActivities.includes(activity)) {
+          return null;
         }
 
         return (
           <Tabs.Screen
-            key={`${activity}-${index}`} // Unique key to force re-render
-            name={routeName}
+            key={activity}
+            name={activity}
             options={{
-              title: activity,
-              tabBarIcon: ({ color, size }) => (
-                <Ionicons
-                  name={
-                    activity === "Music"
-                      ? "musical-notes"
-                      : activity === "Drawing"
-                      ? "brush"
-                      : activity === "Books"
-                      ? "book"
-                      : activity === "Journal"
-                      ? "journal"
-                      : activity === "Community Sharing"
-                      ? "share-social"
-                      : "game-controller"
-                  }
-                  color={color}
-                  size={size}
-                />
-              ),
+              title: activity.charAt(0).toUpperCase() + activity.slice(1).replace("-", " "),
+              tabBarIcon: ({ color, size }) => {
+                let iconName;
+                switch (activity) {
+                  case "music":
+                    iconName = "musical-notes";
+                    break;
+                  case "drawing":
+                    iconName = "brush";
+                    break;
+                  case "books":
+                    iconName = "book";
+                    break;
+                  case "journal":
+                    iconName = "journal";
+                    break;
+                  case "community-sharing":
+                    iconName = "share-social";
+                    break;
+                  case "games":
+                    iconName = "game-controller";
+                    break;
+                  default:
+                    iconName = "help";
+                }
+                return <Ionicons name={iconName as keyof typeof Ionicons.glyphMap} color={color} size={size} />;
+              },
             }}
           />
         );
       })}
 
+      {/* Hide unselected activities */}
+      {allPossibleActivities
+        .filter(activity => !activityTabs.includes(activity))
+        .map(activity => (
+          <Tabs.Screen
+            key={`hidden-${activity}`}
+            name={activity}
+            options={{ href: null }} // Hide from tab bar
+          />
+        ))}
+
+      {/* More and Settings tabs */}
       <Tabs.Screen
         name="more"
         options={{
@@ -107,6 +135,7 @@ export default function TabsLayout() {
         }}
       />
 
+      {/* Admin tab (conditional) */}
       {isAdmin && (
         <Tabs.Screen
           name="admin"
