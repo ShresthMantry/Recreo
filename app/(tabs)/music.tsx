@@ -65,7 +65,7 @@ export default function YouTubeMusicPlayer() {
   const [playerReady, setPlayerReady] = useState(false);
 
   // Refs
-  const playerRef = useRef<any>(null);
+  const playerRef = useRef<YoutubePlayer>(null);
   const searchTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const progressIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -171,6 +171,7 @@ export default function YouTubeMusicPlayer() {
 
   // Player state handler
   const onPlayerStateChange = useCallback((state: string) => {
+    console.log("Player state changed:", state);
     switch (state) {
       case "playing":
         setIsBuffering(false);
@@ -190,7 +191,7 @@ export default function YouTubeMusicPlayer() {
         setPosition(0);
         if (isRepeat) {
           playerRef.current?.seekTo(0, true);
-          playerRef.current?.playVideo();
+          setIsPlaying(true);
         } else {
           playNextTrack();
         }
@@ -223,36 +224,20 @@ export default function YouTubeMusicPlayer() {
   }, []);
 
   // Play track
-  const playTrack = useCallback(async (track: Track) => {
-    try {
-      setCurrentTrack(track);
-      setIsBuffering(true);
-      
-      if (playerRef.current) {
-        await playerRef.current.seekTo(0, true);
-        setIsPlaying(true);
-      }
-    } catch (error) {
-      console.error("Error playing track:", error);
-      Alert.alert("Playback Error", "Could not play this track");
-      setIsBuffering(false);
-    }
+  const playTrack = useCallback((track: Track) => {
+    setCurrentTrack(track);
+    setIsBuffering(true);
+    setIsPlaying(true);
   }, []);
 
   // Toggle play/pause
-  const togglePlayPause = useCallback(async () => {
-    if (!currentTrack) return;
-    
+  const togglePlayPause = useCallback(() => {
     try {
-      if (isPlaying) {
-        await playerRef.current?.pauseVideo();
-      } else {
-        await playerRef.current?.playVideo();
-      }
+      setIsPlaying(prev => !prev);
     } catch (error) {
       console.error("Error toggling play/pause:", error);
     }
-  }, [currentTrack, isPlaying]);
+  }, []);
 
   // Play next track
   const playNextTrack = useCallback(() => {
@@ -378,34 +363,33 @@ export default function YouTubeMusicPlayer() {
     <SafeAreaView style={styles.container}>
       <StatusBar style="dark" />
 
-      {/* Hidden YouTube Player */}
+      {/* YouTube Player */}
       {currentTrack && (
-        <View style={styles.videoContainer}>
-          <YoutubePlayer
-            ref={playerRef}
-            height={0}
-            play={isPlaying}
-            videoId={currentTrack.id.videoId}
-            onChangeState={onPlayerStateChange}
-            onReady={() => {
-              setPlayerReady(true);
-              setIsBuffering(false);
-              playerRef.current?.getDuration().then((dur: number) => {
-                setDuration(dur * 1000);
-              });
-            }}
-            onError={(error) => {
-              console.error("YouTube player error:", error);
-              Alert.alert("Playback Error", "Could not play this video");
-              setIsBuffering(false);
-            }}
-            webViewProps={{
-              allowsFullscreenVideo: false,
-              allowsInlineMediaPlayback: true,
-            }}
-            webViewStyle={styles.hiddenPlayer}
-          />
-        </View>
+        <YoutubePlayer
+          ref={playerRef}
+          height={0}
+          width={0}
+          play={isPlaying}
+          videoId={currentTrack.id.videoId}
+          onChangeState={onPlayerStateChange}
+          onReady={() => {
+            setPlayerReady(true);
+            setIsBuffering(false);
+            playerRef.current?.getDuration().then((dur: number) => {
+              setDuration(dur * 1000);
+            });
+          }}
+          onError={(error) => {
+            console.error("YouTube player error:", error);
+            Alert.alert("Playback Error", "Could not play this video");
+            setIsBuffering(false);
+          }}
+          webViewProps={{
+            allowsFullscreenVideo: false,
+            allowsInlineMediaPlayback: true,
+          }}
+          webViewStyle={styles.hiddenPlayer}
+        />
       )}
 
       {/* Header */}
@@ -580,14 +564,10 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: "#f9f9f9",
   },
-  videoContainer: {
-    position: 'absolute',
-    width: 0,
-    height: 0,
-    overflow: 'hidden',
-  },
   hiddenPlayer: {
     opacity: 0,
+    height: 0,
+    width: 0,
   },
   header: {
     padding: 15,
