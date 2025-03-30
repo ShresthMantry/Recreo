@@ -6,7 +6,7 @@ export default function RootLayout() {
   return (
     <AuthProvider>
       <ThemeProvider>
-        <Stack>
+        <Stack screenOptions={{ headerShown: false }}>
           {/* Define the (auth) group for login/register/select-activities */}
           <Stack.Screen name="(auth)/index" options={{ headerShown: false }} redirect={true} />
           <Stack.Screen name="(auth)/login" options={{ headerShown: false }} />

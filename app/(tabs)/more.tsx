@@ -8,7 +8,7 @@ const allActivities = [
   "Drawing",
   "Books",
   "Journal",
-  "Community Sharing",
+  "Community-Sharing",
   "Games",
 ];
 
@@ -30,7 +30,14 @@ export default function More() {
         renderItem={({ item }) => (
           <TouchableOpacity
             style={styles.activityItem}
-            onPress={() => router.push(`/app/tabs/${item.toLowerCase().replace(" ", "-")}`)}
+            onPress={() => {
+              const route = `/(tabs)/${item.toLowerCase()}`;
+              if (["/(tabs)/music", "/(tabs)/drawing", "/(tabs)/books", "/(tabs)/journal", "/(tabs)/community-sharing", "/(tabs)/games"].includes(route)) {
+                router.push(route as "/(tabs)/music" | "/(tabs)/drawing" | "/(tabs)/books" | "/(tabs)/journal" | "/(tabs)/community-sharing" | "/(tabs)/games");
+              } else {
+                console.error("Invalid route:", route);
+              }
+            }}
           >
             <Text>{item}</Text>
           </TouchableOpacity>
