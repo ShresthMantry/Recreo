@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { View, Text, TextInput, TouchableOpacity, FlatList, StyleSheet, SafeAreaView, StatusBar } from "react-native";
 import { useAuth } from "../../context/AuthContext";
 import { useRouter } from "expo-router";
+import * as SecureStore from "expo-secure-store"; 
 
 const activitiesList = [
   "Music",
@@ -30,6 +31,14 @@ export default function Settings() {
     await updateUser({ name, activities: selectedActivities });
     alert("Settings updated!");
     router.replace("/settings");
+  };
+  const handleLogout = async () => {
+    await logout();
+
+    // Clear session cookie on logout
+    await SecureStore.deleteItemAsync("session");
+
+    router.replace("/(auth)/login");
   };
 
   return (
@@ -77,7 +86,7 @@ export default function Settings() {
             <Text style={styles.saveButtonText}>Save Changes</Text>
           </TouchableOpacity>
 
-          <TouchableOpacity style={styles.logoutButton} onPress={logout}>
+          <TouchableOpacity style={styles.logoutButton} onPress={handleLogout}>
             <Text style={styles.logoutButtonText}>Logout</Text>
           </TouchableOpacity>
         </View>
