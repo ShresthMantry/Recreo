@@ -11,7 +11,7 @@ const { width } = Dimensions.get("window");
 const styles = StyleSheet.create({
   tabBar: {
     backgroundColor: "#121212",
-    borderTopColor: "transparent", // Remove the white line
+    borderTopColor: "#121212", // Remove the white line
     height: 65,
     paddingBottom: 5,
     elevation: 8,
